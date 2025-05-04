@@ -1,0 +1,839 @@
+<html>
+<head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/seedrandom/3.0.5/seedrandom.min.js"></script>
+    <script>
+    // Globals
+    // ------------------------------------------
+    const KEY_LEFT = 37;
+    const KEY_RIGHT = 39;
+    const KEY_UP = 38;
+    const KEY_DOWN = 40;
+
+    const FACE_LEFT = 0;
+    const FACE_RIGHT = 1;
+
+    const CHUNK_SIZE = 1000; // 청크 크기 (픽셀)
+    const RENDER_DISTANCE = 5; // 렌더링 거리 (청크 단위)
+    const MAX_OBJECTS = 25000;
+    const ENEMY_SPAWN_COUNT_PER_CHUNK = 20;
+    const TREE_SPAWN_COUNT_PER_CHUNK = 30;
+
+    // 이미지 리소스 (예시 경로)
+    const playerImageLeft = makeImage('img/player-1.L.png');
+    const playerImageLeft2 = makeImage('img/player-2.L.png');
+    const playerImageRight = makeImage('img/player-1.png');
+    const playerImageRight2 = makeImage('img/player-2.png');
+    const skeletonImageLeft = makeImage('img/skeleton-1.L.png');
+    const skeletonImageLeft2 = makeImage('img/skeleton-2.L.png');
+    const skeletonImageRight = makeImage('img/skeleton-1.png');
+    const skeletonImageRight2 = makeImage('img/skeleton-2.png');
+    const ballImage1 = makeImage('img/ball-1.png');
+    const ballImage2 = makeImage('img/ball-2.png');
+    const candyDroppedImage = makeImage('img/candy-dropped.png');
+    const candyImage = makeImage('img/candy.png');
+    const micImage = makeImage('img/mic.png');
+    const floorImage = makeImage('img/floor.png');
+    const treeImage = makeImage('img/tree.png');
+
+    const gameRunning = true;
+    const targetFps = 60;
+    let player;
+    let canvas;
+    let canvasContainer;
+    let context;
+    let gameIntervalId;
+    let levelRunStart;
+    let input = {
+        right: false,
+        left: false,
+        up: false,
+        down: false,
+    };
+    let objects = [];
+    let chunks = {};
+    let enemiesDestroyed = 0;
+    let nextEnemyId = 0;
+
+    // Helper Functions
+    // ------------------------------------------
+    function resetCanvas() {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = 'black';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function getChunkCoord(x, y) {
+        return {
+            x: Math.floor(x / CHUNK_SIZE),
+            y: Math.floor(y / CHUNK_SIZE)
+        };
+    }
+
+    function manageChunks() {
+        const playerChunk = getChunkCoord(player.x, player.y);
+        console.log("Player Chunk:", playerChunk); // 플레이어 청크 좌표 확인
+        
+        const activeChunks = {};
+        for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
+            for (let dy = -RENDER_DISTANCE; dy <= RENDER_DISTANCE; dy++) {
+                const chunkX = playerChunk.x + dx;
+                const chunkY = playerChunk.y + dy;
+                const chunkKey = `${chunkX},${chunkY}`;
+                
+                if (!chunks[chunkKey]) {
+                    console.log("Generating Chunk:", chunkKey); // 새 청크 생성 로그
+                    generateChunk(chunkX, chunkY);
+                }
+                activeChunks[chunkKey] = true;
+            }
+        }
+        
+        // 멀리 떨어진 청크 제거
+        for (const chunkKey in chunks) {
+            if (!activeChunks[chunkKey]) {
+                console.log("Unloading Chunk:", chunkKey); // 청크 언로드 로그
+                unloadChunk(chunkKey);
+            }
+        }
+    }
+
+    function generateChunk(chunkX, chunkY) {
+        const chunk = {
+            enemies: [],
+            terrain: [],
+            items: []
+        };
+
+        // 프로시저럴 생성용 시드
+        const seed = chunkX * 1000 + chunkY;
+        const rng = new Math.seedrandom(seed);
+
+        // 적 생성
+        for(let i = 0; i < ENEMY_SPAWN_COUNT_PER_CHUNK; i++) {
+            const x = chunkX * CHUNK_SIZE + rng() * CHUNK_SIZE;
+            const y = chunkY * CHUNK_SIZE + rng() * CHUNK_SIZE;
+            const enemy = new Enemy(x, y);
+            chunk.enemies.push(enemy);
+            objects.push(enemy);
+        }
+
+        // 나무 생성
+        for(let i = 0; i < TREE_SPAWN_COUNT_PER_CHUNK; i++) {
+            const x = chunkX * CHUNK_SIZE + rng() * CHUNK_SIZE;
+            const y = chunkY * CHUNK_SIZE + rng() * CHUNK_SIZE;
+            const tree = new Tree(x, y);
+            chunk.terrain.push(tree);
+            objects.push(tree);
+        }
+
+        chunks[`${chunkX},${chunkY}`] = chunk;
+    }
+
+    function unloadChunk(chunkKey) {
+        const chunk = chunks[chunkKey];
+        if(chunk) {
+            chunk.enemies.forEach(enemy => {
+                const index = objects.indexOf(enemy);
+                if(index !== -1) objects.splice(index, 1);
+            });
+            chunk.terrain.forEach(tree => {
+                const index = objects.indexOf(tree);
+                if(index !== -1) objects.splice(index, 1);
+            });
+            delete chunks[chunkKey];
+        }
+    }
+
+    // World Object Classes
+    // ------------------------------------------
+    class Player {
+        constructor(x, y) {
+            this.leftAnimation = new Animation([
+                { time: 12, image: playerImageLeft },
+                { time: 12, image: playerImageLeft2 },
+            ]);
+            this.rightAnimation = new Animation([
+                { time: 12, image: playerImageRight },
+                { time: 12, image: playerImageRight2 },
+            ]);
+            this.idle = true;
+            this.x = x;
+            this.y = y;
+            this.level = 1;
+            this.width = 30 * 2;
+            this.height = 33 * 2;
+            this.health = 50;
+            this.speed = 3;
+            this.items = [new MicWeapon(), new DiscoBallWeapon()];
+            this.xp = 0;
+            this.nextLevelXp = 10;
+            this.prevLevelXp = 0;
+            this.setDirection(FACE_LEFT);
+        }
+
+        update() {
+            if (input.right) this.x += this.speed;
+            if (input.left) this.x -= this.speed;
+            if (input.up) this.y -= this.speed;
+            if (input.down) this.y += this.speed;
+            this.idle = !input.right && !input.left && !input.up && !input.down;
+            focusCameraOn(this.x, this.y);
+            this.animation.update(this.idle);
+            this.items.forEach(item => item.update());
+        }
+
+        draw() {
+            this.items.forEach(item => item.draw());
+            const image = this.animation.image();
+            context.drawImage(
+                image,
+                this.x - (this.width / 2),
+                this.y - (this.height / 2),
+                this.width, this.height
+            );
+        }
+
+        setDirection(direction) {
+            if (this.direction === direction) return;
+            this.direction = direction;
+            this.animation = direction === FACE_LEFT ? this.leftAnimation : this.rightAnimation;
+            this.animation.reset();
+        }
+
+        gainXp(xp) {
+            this.xp += xp;
+            if (this.xp >= this.nextLevelXp) this.levelUp();
+        }
+
+        levelUp() {
+            this.level += 1;
+            this.prevLevelXp = this.nextLevelXp;
+            this.nextLevelXp = this.nextLevelXp * 2.5;
+        }
+    }
+
+    class Enemy {
+        constructor(x, y) {
+            this.id = getNextEnemyId();
+            this.leftAnimation = new Animation([
+                { time: 100, image: skeletonImageLeft },
+                { time: 100, image: skeletonImageLeft2 },
+            ]);
+            this.rightAnimation = new Animation([
+                { time: 100, image: skeletonImageRight },
+                { time: 100, image: skeletonImageRight2 },
+            ]);
+            this.x = x;
+            this.prevX = x;
+            this.y = y;
+            this.prevY = y;
+            this.width = 30 * 2;
+            this.height = 33 * 2;
+            this.speed = 0.4;
+            this.health = 3;
+            this.attackStrength = 1;
+            this.attackSpeed = 500;
+            this.lastAttackTime = Date.now();
+            this.destroyed = false;
+            this.setDirection(FACE_LEFT);
+        }
+
+        update() {
+            this.prevX = this.x;
+            this.prevY = this.y;
+
+            if (this.health <= 0) {
+                this.destroy();
+                return;
+            }
+
+            const dx = player.x - this.x;
+            const dy = player.y - this.y;
+            const angle = Math.atan2(dy, dx);
+            this.x += this.speed * Math.cos(angle);
+            this.y += this.speed * Math.sin(angle);
+
+            const msSinceLastAttack = Date.now() - this.lastAttackTime;
+            if (msSinceLastAttack > this.attackSpeed) {
+                if (Math.abs(dx) < 40 && Math.abs(dy) < 40) {
+                    player.health = Math.max(player.health - this.attackStrength, 0);
+                    this.lastAttackTime = Date.now();
+                }
+            }
+
+            this.setDirection(this.x > this.prevX ? FACE_RIGHT : FACE_LEFT);
+            this.animation.update(false);
+        }
+
+        draw() {
+            const image = this.animation.image();
+            context.drawImage(image, this.x, this.y, this.width, this.height);
+        }
+
+        setDirection(direction) {
+            if (this.direction === direction) return;
+            this.direction = direction;
+            this.animation = direction === FACE_LEFT ? this.leftAnimation : this.rightAnimation;
+            this.animation.reset();
+        }
+
+        hit(strength) {
+            this.health -= strength;
+            objects.push(new DamageTakenText(strength, this.x, this.y));
+        }
+
+        destroy() {
+            if (this.destroyed) return;
+            this.destroyed = true;
+            enemiesDestroyed += 1;
+            objects.push(new Candy(this.x, this.y));
+        }
+    }
+
+    class Tree {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.width = 50;
+            this.height = 70;
+            this.image = treeImage;
+        }
+        update() {}  // 빈 메서드 추가
+        draw() {
+            context.drawImage(
+                this.image,
+                this.x - this.width/2,
+                this.y - this.height/2,
+                this.width, this.height
+            );
+        }
+    }
+
+    class Candy {
+        constructor(x, y) {
+            this.image = candyDroppedImage;
+            this.x = x;
+            this.y = y;
+            this.attractRadius = 200;
+            this.pickupRadius = 50;
+            this.xp = 1;
+        }
+
+        update() {
+            if (this.destroyed) return;
+
+            if (pointInCircle(this.x, this.y, player.x, player.y, this.pickupRadius)) {
+                this.pickup();
+                return;
+            }
+
+            if (pointInCircle(this.x, this.y, player.x, player.y, this.attractRadius)) {
+                this.x = lerp(this.x, player.x, 0.1);
+                this.y = lerp(this.y, player.y, 0.1);
+            }
+        }
+
+        draw() {
+            context.drawImage(
+                this.image,
+                this.x,
+                this.y,
+                this.image.width, this.image.height
+            );
+        }
+
+        pickup() {
+            if (this.destroyed) return;
+            this.destroy();
+            player.gainXp(this.xp);
+        }
+
+        destroy() {
+            if (this.destroyed) return;
+            this.destroyed = true;
+        }
+    }
+
+    class DamageTakenText {
+        constructor(text, x, y) {
+            this.text = text;
+            this.x = x;
+            this.y = y;
+            this.framesCount = 0;
+            this.growAnimationFrames = 40;
+            this.fadeAnimationFrames = 60;
+            this.fontSize = 10;
+            this.fontOpacity = 1;
+            this.growToSize = 32;
+            this.fillStyle = 'white';
+            this.strokeColor = 'black';
+        }
+
+        update() {
+            this.y -= 0.5;
+            if (this.framesCount < this.growAnimationFrames) {
+                this.fontSize = lerp(this.fontSize, this.growToSize, 0.4);
+            } else if (this.framesCount < this.growAnimationFrames + this.fadeAnimationFrames) {
+                this.fontOpacity = lerp(this.fontOpacity, 0, 0.25);
+            } else {
+                this.destroyed = true;
+            }
+            this.framesCount += 1;
+        }
+
+        draw() {
+            drawContext(
+                () => {
+                    context.font = `${this.fontSize}px monospace`;
+                    context.fillStyle = this.fillStyle;
+                    context.strokeColor = this.strokeColor;
+                    context.globalAlpha = this.fontOpacity;
+                },
+                () => context.fillText(this.text, this.x, this.y)
+            );
+        }
+    }
+
+    class Weapon {
+        constructor(speed, animationFrames, strength) {
+            this.attackSpeed = speed; // ms
+            this.attackAnimationFrames = animationFrames;
+            this.attackStrength = strength;
+            this.lastAttackTime = Date.now();
+            this.attacking = false;
+            this.attackFramesPassed = 0;
+            this.updateFramesPassed = 0;
+        }
+
+        update() {
+            const msSinceLastAttack =
+                Date.now() - this.lastAttackTime;
+            if (msSinceLastAttack > this.attackSpeed) {
+                this.attacking = true;
+                this.lastAttackTime = Date.now();
+            }
+            if (this.attacking) {
+                this.attackFramesPassed += 1;
+                if (this.attackFramesPassed >= this.attackAnimationFrames) {
+                    this.attacking = false;
+                    this.attackFramesPassed = 0;
+                }
+            }
+            this.updateFramesPassed += 1;
+        }
+
+        draw() {}
+
+        firstAttackFrame() {
+            return this.attacking && this.attackFramesPassed === 1;
+        }
+    }
+
+    class DiscoPool extends Weapon {
+        constructor() {
+            const speed = 2000;
+            const animationFrames = 5;
+            const strength = 1;
+            super(speed, animationFrames, strength);
+            this.updateFrames = 60 * 10;
+            this.animation = new Animation([
+                { time: 12, image: ballImage1 },
+                { time: 12, image: ballImage2 },
+            ]);
+            this.x = player.x + randomRange(-300, 300);
+            this.y = player.y + randomRange(-300, 300);
+            this.fillStyle = 'rgb(225, 180, 255)';
+            this.opacity = 0.7;
+            this.radius = 80;
+        }
+
+        update() {
+            super.update();
+            this.animation.update();
+            if (this.updateFramesPassed > this.updateFrames) {
+                this.destroyed = true;
+            }
+            this.opacity = lerp(this.opacity, 0, 0.002);
+
+            if (this.firstAttackFrame()) {
+                // horribly inefficient, iterate over all the objects to find
+                // enemies that we are hitting
+                for (const object of objects) {
+                    if (object instanceof Enemy) {
+                        if (!pointInCircle(object.x, object.y, this.x, this.y, this.radius)) continue;
+                        object.hit(this.attackStrength);
+                    }
+                }
+            }
+        }
+
+        draw() {
+            drawContext(
+                () => {
+                    context.fillStyle = this.fillStyle;
+                    context.globalAlpha = this.opacity;
+                }, () => {
+                    context.beginPath();
+                    context.ellipse(this.x, this.y, this.radius, this.radius, 0, 0, 360);
+                    context.fill();
+                },
+            );
+
+            // draw the enemy sprite...
+            const image = this.animation.image();
+            context.drawImage(
+                image,
+                this.x - (image.width / 3.2),
+                this.y - 140,
+                image.width / 2.0, image.height / 2.0
+            );
+        }
+    }
+
+    class DiscoBallWeapon extends Weapon {
+        constructor() {
+            const attackSpeed = 14000; // ms
+            const attackAnimationFrames = 5;
+            super(attackSpeed, attackAnimationFrames);
+            this.level = 4;
+        }
+
+        spawnCount() {
+            return this.level;
+        }
+
+        update() {
+            super.update();
+            if (this.firstAttackFrame()) {
+                const spawnCount = this.spawnCount();
+                for (var i = 0; i < spawnCount; i++) {
+                    setTimeout(() => {
+                        objects.push(
+                            new DiscoPool()
+                        );
+                    }, i * (700 + randomRange(0, 100)));
+                }
+            }
+        }
+
+        draw() {}
+    }
+
+    class MicWeapon extends Weapon {
+        constructor() {
+            const attackSpeed = 1000; // ms
+            const attackAnimationFrames = 5;
+            const attackStrength = 1;
+            super(attackSpeed, attackAnimationFrames, attackStrength);
+            this.level = 8;
+            this.radius = 100;
+            this.image = micImage;
+            this.angle = 0;
+            this.enemiesHit = {};
+        }
+
+        update() {
+            this.angle = (this.angle + (0.05 * this.level)) % 360;
+            this.x = player.x + Math.sin(this.angle) * this.radius;
+            this.y = player.y + Math.cos(this.angle) * this.radius;
+            for (const object of objects) {
+                if (object instanceof Enemy) {
+                    if (
+                        object.id in this.enemiesHit &&
+                        ((new Date()) - this.enemiesHit[object.id]) < this.attackSpeed
+                    ) {
+                        continue;
+                    }
+
+                    if (
+                        this.x > object.x - 50 &&
+                        this.x < object.x + 50 &&
+                        this.y > object.y - 50 &&
+                        this.y < object.y + 50
+                    ) {
+                        object.hit(this.attackStrength);
+                        this.enemiesHit[object.id] = new Date();
+                    }
+                }
+            }
+        }
+
+        draw() {
+            context.save();
+            context.translate(10, 0);
+            context.setTransform(-1, 0, 0, -1, this.x, this.y);
+            context.rotate(-this.angle);
+            context.drawImage(
+                this.image,
+                -this.image.width / 2, -this.image.height / 2
+            );
+            context.restore();
+
+            context.beginPath();
+            context.moveTo(player.x, player.y);
+            context.lineTo(this.x, this.y);
+            context.closePath();
+            context.stroke();
+        }
+    }
+
+    // Game Loop
+    // ------------------------------------------
+    function playGame() {
+        if (!gameRunning) {
+            clearInterval(gameIntervalId);
+            return;
+        }
+
+        if (player.health <= 0) {
+            resetCanvas();
+            guiTopMiddle((x, y) => {
+                context.font = '24px monospace';
+                context.fillStyle = 'white';
+                context.fillText(`Game Over`, x, y);
+            });
+            return;
+        }
+
+        manageChunks();
+        
+        objects.forEach((object, index) => {
+            object?.update();
+            if (object?.destroyed) objects.splice(index, 1);
+        });
+
+        resetCanvas();
+        drawBackground();
+        
+        objects.forEach(object => object?.draw());
+        drawGUI();
+    }
+
+    function drawBackground() {
+        const pattern = context.createPattern(floorImage, 'repeat');
+        context.fillStyle = pattern;
+        const offsetX = -pxStrToNumber(canvasContainer.style.left);
+        const offsetY = -pxStrToNumber(canvasContainer.style.top);
+        context.save();
+        context.translate(offsetX % 50, offsetY % 50);
+        context.fillRect(-offsetX, -offsetY, canvas.width * 10, canvas.height * 10);
+        context.restore();
+    }
+
+    function drawGUI() {
+        const timer = timeSince(levelRunStart);
+        guiTopMiddle((x, y) => {
+            context.fillStyle = 'rgba(0,0,0,0.7)';
+            context.fillRect(x-150, y-30, 300, 40);
+            context.font = '24px monospace';
+            context.fillStyle = 'white';
+            context.textAlign = 'center';
+            context.fillText(
+                `❤️${player.health} 💀${enemiesDestroyed} LV${player.level} ` +
+                `${leftPad(timer.minutes,2,0)}:${leftPad(timer.seconds,2,0)}`,
+                x, y
+            );
+        });
+    }
+
+    function focusCameraOn(targetX, targetY) {
+        const offsetX = canvas.width/2 - targetX;
+        const offsetY = canvas.height/2 - targetY;
+        canvasContainer.style.left = `${offsetX}px`;
+            canvasContainer.style.top = `${offsetY}px`;
+    }
+
+    // 기타 유틸리티 함수들 (lerp, pxStrToNumber 등) 유지
+
+    function getNextEnemyId() {
+        const id = nextEnemyId;
+        nextEnemyId += 1;
+        return id;
+    }
+
+    function boundXToCanvas(x) {
+        const leftBound = 0;
+        const rightBound = canvas.width - window.innerWidth;
+        return Math.max(-rightBound, Math.min(leftBound, x));
+    }
+
+    function boundYToCanvas(y) {
+        const topBound = 0;
+        const bottomBound = canvas.height - window.innerHeight;
+        return Math.max(-bottomBound, Math.min(topBound, y));
+    }
+
+    function lerp(from, to, degree = 1) {
+        return from + degree * (to - from);
+    }
+
+    function pxStrToNumber(value) {
+        return Number(value.replace('px', ''));
+    };
+
+    function guiPosition(x, y, cb) {
+        const xOffset = pxStrToNumber(canvasContainer.style.left);
+        const yOffset = pxStrToNumber(canvasContainer.style.top);
+
+        cb(x - xOffset, y - yOffset);
+    }
+
+    function guiTopMiddle(cb) {
+        const xCenter = window.innerWidth / 2;
+        guiPosition(xCenter, 50, cb);
+    }
+
+    function guiTopRight(cb) {
+        guiPosition(window.innerWidth - 100, 50, cb);
+    }
+
+    function drawContext(setContextCb, drawCb) {
+        const props = ['font', 'fillStyle', 'strokeColor', 'globalAlpha'];
+        const originalValues = props.reduce(
+            (acc, propName) => (acc[propName] = context[propName], acc), {}
+        );
+        setContextCb();
+        drawCb();
+        props.forEach(propName => context[propName] = originalValues[propName]);
+    }
+
+    function measureTextDimensions(text) {
+        const measure = context.measureText(text);
+        return {
+            width: measure.width,
+            height: measure.actualBoundingBoxAscent + measure.actualBoundingBoxDescent
+        };
+    }
+
+    function makeImage(src) {
+        const image = new Image();
+        image.src = src;
+        return image;
+    }
+
+    function timeSince(startDate) {
+        const epochStart = epoch(startDate);
+        const currentEpoch = epoch(new Date());
+        return {
+            minutes: Math.floor((currentEpoch - epochStart) / 60),
+            seconds: (currentEpoch - epochStart) % 60,
+        };
+    }
+
+    function epoch(date) {
+        return Math.floor(date / 1000);
+    }
+
+    function leftPad(toPad, length, padChar) {
+        const toPadLength = String(toPad).length;
+        if (toPadLength >= length) return toPad;
+        return `${(String(padChar) * (toPadLength - length))}${toPad}`;
+    }
+
+    function randomRange(from, to) {
+        return Math.random() * (to - from) + from;
+    }
+
+    function randomNegate(value) {
+        const multipler = Math.random() > 0.5 ? -1 : 1;
+        return value * multipler;
+    }
+
+    /**
+     * Checks if (pointX, pointY) collides with the circle
+     * at (circleX, circleY) with circleRadius.
+     * 
+     * @return bool
+     */
+    function pointInCircle(
+        pointX, pointY, circleX, circleY, circleRadius
+    ) {
+        let distance =
+            Math.pow(circleX - pointX, 2) +
+            Math.pow(circleY - pointY, 2);
+
+        return distance < Math.pow(circleRadius, 2);
+    }
+
+    class Animation {
+        frames = [ /*{time: ..., image: ...}*/ ];
+        currentIndex = 0;
+        framesPassed = 0;
+
+        constructor(frames) {
+            this.frames = frames;
+        }
+
+        image() {
+            return this.frames[this.currentIndex].image;
+        }
+
+        reset() {
+            this.currentIndex = 0;
+            this.currentFrameStart = new Date();
+        }
+
+        update(isIdle) {
+            if (isIdle) {
+                this.reset();
+                return;
+            }
+
+            const currentFrame = this.frames[this.currentIndex];
+            if (this.framesPassed >= currentFrame.time) {
+                this.next();
+            }
+            this.framesPassed += 1;
+        }
+
+        next() {
+            this.currentIndex = (this.currentIndex + 1) % this.frames.length;
+            this.framesPassed = 0;
+        }
+    }
+
+    // Initialization
+    window.addEventListener('keydown', (e) => {
+        if (e.keyCode === KEY_LEFT) {
+            input.left = true;
+            player.setDirection(FACE_LEFT);
+        } else if (e.keyCode === KEY_RIGHT) {
+            input.right = true;
+            player.setDirection(FACE_RIGHT);
+        } else if (e.keyCode === KEY_UP) input.up = true;
+        else if (e.keyCode === KEY_DOWN) input.down = true;
+    });
+
+    window.addEventListener('keyup', (e) => {
+        if (e.keyCode === KEY_LEFT) input.left = false;
+        if (e.keyCode === KEY_RIGHT) input.right = false;
+        if (e.keyCode === KEY_UP) input.up = false;
+        if (e.keyCode === KEY_DOWN) input.down = false;
+        if (e.keyCode === 48) {
+            for (const object of objects) {
+                if (object instanceof Enemy) {
+                    object.destroy();
+                }
+            }
+        }
+    });
+
+    window.addEventListener('load', () => {
+        canvas = document.getElementById('canvas');
+        canvasContainer = document.getElementById('canvas-container');
+        context = canvas.getContext('2d');
+        player = new Player(CHUNK_SIZE / 2, CHUNK_SIZE / 2);
+        objects.push(player);
+        levelRunStart = new Date();
+        gameIntervalId = setInterval(playGame, 1000 / targetFps);
+    });
+
+    // 이벤트 리스너 및 나머지 코드 유지
+    </script>
+</head>
+<body style="overflow:hidden; padding:0; margin:0;">
+    <div id="canvas-container" style="position:absolute; top:0; left:0;">
+        <canvas id="canvas" width="800" height="600"></canvas>
+    </div>
+</body>
+</html>
